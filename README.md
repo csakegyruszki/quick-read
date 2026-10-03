@@ -16,7 +16,9 @@ provides a Python API, a CLI and an optional MCP server.
 - **IPv6 transition forms are unwrapped.** NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`,
   IPv4-compatible `::/96`, 6to4 `2002::/16`, Teredo `2001::/32` and IPv4-mapped addresses are
   decoded and the embedded IPv4 address must be global too, so `[64:ff9b::7f00:1]` is blocked as
-  127.0.0.1 (`_ip_allowed` in `quick_read/core.py`).
+  127.0.0.1. IPv4-translated `::ffff:0:0:0/96` is unwrapped the same way; the local-use NAT64
+  prefix `64:ff9b:1::/48`, site-local `fec0::/10`, `5f00::/16` and the IPv4 anycast blocks
+  `192.0.0.0/24` and `192.88.99.0/24` are denied outright (`_ip_allowed` in `quick_read/core.py`).
 - **Type and size enforced on the stream.** A Content-Type allowlist (`text/html`,
   `application/xhtml+xml`, `text/plain`) and a 5 MB cap checked while streaming, before any
   extraction.

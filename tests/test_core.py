@@ -184,3 +184,22 @@ def test_observation_ipaddress_page_false_positive(record_property):
     record_property("injection_risk", r["injection_risk"])
     print(f"OBSERVATION ipaddress page injection_risk={r['injection_risk']} (2026-10-03: HIGH)")
     assert r["injection_risk"] in ("CLEAN", "LOW", "MED", "HIGH")
+
+
+# Regression cases from a code review (2026-10-03): addresses that passed the address policy.
+@pytest.mark.parametrize("addr", [
+    "64:ff9b:1:7f00:0:100:808:808",   # local-use NAT64 /48 hiding 127.0.0.1 (RFC 6052 /48 layout)
+    "64:ff9b:1:a9fe:0:fe00:808:808",  # same, 169.254.254.0
+    "::ffff:0:7f00:1",                # IPv4-translated (SIIT) loopback
+    "fec0::1",                        # deprecated site-local
+    "5f00::1",                        # SRv6 SID block
+    "192.0.0.9",                      # IETF protocol assignments (anycast)
+    "192.88.99.1",                    # deprecated 6to4 relay anycast
+])
+def test_review_regressions_blocked(addr):
+    assert core._ip_allowed(ipaddress.ip_address(addr)) is False
+
+
+def test_public_nat64_and_siit_still_allowed():
+    assert core._ip_allowed(ipaddress.ip_address("64:ff9b::808:808")) is True
+    assert core._ip_allowed(ipaddress.ip_address("::ffff:0:808:808")) is True

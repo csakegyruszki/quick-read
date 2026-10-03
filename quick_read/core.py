@@ -50,18 +50,23 @@ def _sha(b: bytes) -> str:
 
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
-_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
 _V4_COMPAT = ipaddress.ip_network("::/96")
+_SIIT = ipaddress.ip_network("::ffff:0:0:0/96")     # IPv4-translated (RFC 6145)
 _6TO4 = ipaddress.ip_network("2002::/16")
 _TEREDO = ipaddress.ip_network("2001::/32")
+# Denied outright: local-use NAT64 /48 (RFC 8215; its IPv4 layout depends on the prefix length, so
+# no single decoding is safe), deprecated site-local, SRv6 SIDs, and IPv4 special-purpose anycast
+# ranges that Python's `is_global` (IANA registry) still reports as global.
+_DENY = [ipaddress.ip_network(n) for n in (
+    "64:ff9b:1::/48", "fec0::/10", "5f00::/16", "192.0.0.0/24", "192.88.99.0/24")]
 
 
 def _embedded_v4(ip) -> list:
-    """IPv4 addresses embedded in the IPv6 transition forms (NAT64, IPv4-compatible, 6to4, Teredo).
-    Empty list for any other address."""
+    """IPv4 addresses embedded in the IPv6 transition forms (NAT64 /96, IPv4-compatible,
+    IPv4-translated, 6to4, Teredo). Empty list for any other address."""
     n = int(ip)
     low32 = ipaddress.IPv4Address(n & 0xFFFFFFFF)
-    if ip in _NAT64 or ip in _NAT64_LOCAL or ip in _V4_COMPAT:
+    if ip in _NAT64 or ip in _V4_COMPAT or ip in _SIIT:
         return [low32]
     if ip in _6TO4:                       # 2002:AABB:CCDD::/48 carries the IPv4 in bits 16..48
         return [ipaddress.IPv4Address((n >> 80) & 0xFFFFFFFF)]
@@ -77,6 +82,8 @@ def _ip_allowed(ip) -> bool:
     Teredo addresses must itself be global, otherwise `64:ff9b::7f00:1` would reach loopback."""
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped
+    if any(ip.version == net.version and ip in net for net in _DENY):
+        return False
     if ip.version == 6:
         embedded = _embedded_v4(ip)
         if embedded:
