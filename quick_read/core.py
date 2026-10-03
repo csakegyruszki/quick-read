@@ -49,10 +49,38 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+_V4_COMPAT = ipaddress.ip_network("::/96")
+_6TO4 = ipaddress.ip_network("2002::/16")
+_TEREDO = ipaddress.ip_network("2001::/32")
+
+
+def _embedded_v4(ip) -> list:
+    """IPv4 addresses embedded in the IPv6 transition forms (NAT64, IPv4-compatible, 6to4, Teredo).
+    Empty list for any other address."""
+    n = int(ip)
+    low32 = ipaddress.IPv4Address(n & 0xFFFFFFFF)
+    if ip in _NAT64 or ip in _NAT64_LOCAL or ip in _V4_COMPAT:
+        return [low32]
+    if ip in _6TO4:                       # 2002:AABB:CCDD::/48 carries the IPv4 in bits 16..48
+        return [ipaddress.IPv4Address((n >> 80) & 0xFFFFFFFF)]
+    if ip in _TEREDO:                     # server in bits 32..64, client = last 32 bits inverted
+        return [ipaddress.IPv4Address((n >> 64) & 0xFFFFFFFF),
+                ipaddress.IPv4Address(~n & 0xFFFFFFFF)]
+    return []
+
+
 def _ip_allowed(ip) -> bool:
-    """True only for globally routable unicast addresses (IPv4-mapped IPv6 is unwrapped)."""
+    """True only for globally routable unicast addresses. IPv4-mapped IPv6 is unwrapped, and the
+    IPv4 embedded in NAT64 (64:ff9b::/96, 64:ff9b:1::/48), IPv4-compatible (::/96), 6to4 and
+    Teredo addresses must itself be global, otherwise `64:ff9b::7f00:1` would reach loopback."""
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped
+    if ip.version == 6:
+        embedded = _embedded_v4(ip)
+        if embedded:
+            return all(_ip_allowed(v4) for v4 in embedded)
     # `is_global` is False for CGNAT 100.64/10, private, loopback, link-local, reserved.
     return bool(ip.is_global) and not ip.is_multicast
 

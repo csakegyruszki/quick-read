@@ -1,8 +1,8 @@
 # quick-read
 
 Fast single-URL reader for LLM agents. Fetches one static web page, extracts clean
-Markdown text with [trafilatura](https://github.com/adbar/trafilatura), and refuses to
-touch anything dangerous. In-process: no browser, no subprocess, about one second per page.
+Markdown text with [trafilatura](https://github.com/adbar/trafilatura), and applies
+scheme, address, content-type and size guards (see Known limits). In-process: no browser, no subprocess, about one second per page.
 
 ```
 pip install .            # httpx + trafilatura
@@ -34,7 +34,10 @@ example to archive the raw page; a callback exception is reported as `capture_er
 - http/https only.
 - SSRF: every resolved address must be globally routable (`ipaddress.is_global`), checked on
   every redirect hop; redirects are followed manually, at most 5. Covers loopback, private,
-  link-local, CGNAT (100.64.0.0/10), reserved, multicast and IPv4-mapped IPv6.
+  link-local, CGNAT (100.64.0.0/10), reserved, multicast and IPv4-mapped IPv6. IPv6 forms that
+  embed an IPv4 address are unwrapped and the embedded address must be global too: NAT64
+  `64:ff9b::/96` and `64:ff9b:1::/48`, IPv4-compatible `::/96`, 6to4 `2002::/16`, Teredo `2001::/32`
+  (so `[64:ff9b::7f00:1]` is blocked as 127.0.0.1)
 - Content-Type allowlist: `text/html`, `application/xhtml+xml`, `text/plain`. PDF gets a hint.
 - 5 MB cap, enforced while streaming. Connect timeout 5 s, total 15 s.
 - No JavaScript. A page that yields under 400 characters is flagged `needs_render`.
@@ -61,7 +64,8 @@ example to archive the raw page; a callback exception is reported as `capture_er
   PREVIOUS AND FOLLOWING INSTRUCTIONS". It missed "Ignore the above directions...", "Ignore
   the prompt above...", and a role-reassignment payload with no trigger phrase. The false
   positive was the Python `ipaddress` documentation page (HIGH, via the `act as` role pattern
-  matching "can act as containers"). Pages that discuss prompt injection are flagged too.
+  matching "can act as containers"; recorded as an observation in
+  `tests/test_core.py::test_observation_ipaddress_page_false_positive`). Pages that discuss prompt injection are flagged too.
   Ten samples say little about real-world rates. Treat `injection_risk=CLEAN` as "no known
   pattern matched", never as "safe"; the UNTRUSTED wrapper is the actual defence, and only
   works if the consuming agent honours it. English only; paraphrase, encoding and other
@@ -77,7 +81,7 @@ python -m pytest -m "not network"     # offline guard tests only
 ```
 
 Guard tests use real addresses (127.0.0.1, 10.0.0.1, 169.254.169.254, `[::ffff:127.0.0.1]`,
-100.64.1.1, `file://`), not mocks.
+100.64.1.1, the NAT64/IPv4-compatible/6to4/Teredo forms above, `file://`), not mocks.
 
 ## License
 
