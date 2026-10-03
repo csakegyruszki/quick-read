@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quick-read"
+version = "0.1.0"
+description = "Fast single-URL reader for LLM agents: static fetch + text extraction with SSRF, type, size and prompt-injection guards"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "httpx==0.28.1",
+    "trafilatura==2.3.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp==1.30.0"]
+
+[project.urls]
+Homepage = "https://github.com/csakegyruszki/quick-read"
+
+[tool.setuptools]
+packages = ["quick_read"]
+
+[tool.pytest.ini_options]
+markers = ["network: tests that need real internet access (skipped if unreachable)"]
