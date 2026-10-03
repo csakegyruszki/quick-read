@@ -2,7 +2,7 @@
 
 Fast single-URL reader for LLM agents. Fetches one static web page, extracts clean
 Markdown text with [trafilatura](https://github.com/adbar/trafilatura), and applies
-scheme, address, content-type and size guards (see Known limits). In-process: no browser, no subprocess, about one second per page.
+scheme, address, content-type and size guards (see Known limits). In-process: no browser, no subprocess. Measured 2026-10-03 on one Windows machine, 3 runs on the English Wikipedia article for Python: median 1.99 s wall time per call (fetch 0.6-0.9 s, extraction about 0.9 s). One page, one connection; yours will differ.
 
 ```
 pip install .            # httpx + trafilatura
@@ -39,7 +39,7 @@ example to archive the raw page; a callback exception is reported as `capture_er
   `64:ff9b::/96` and `64:ff9b:1::/48`, IPv4-compatible `::/96`, 6to4 `2002::/16`, Teredo `2001::/32`
   (so `[64:ff9b::7f00:1]` is blocked as 127.0.0.1)
 - Content-Type allowlist: `text/html`, `application/xhtml+xml`, `text/plain`. PDF gets a hint.
-- 5 MB cap, enforced while streaming. Connect timeout 5 s, total 15 s.
+- 5 MB cap, enforced while streaming. Connect timeout 5 s; the elapsed-time budget of 15 s is checked before each redirect hop and after each streamed chunk, and httpx applies 15 s per read operation. DNS resolution happens before that check and is not included in the budget.
 - No JavaScript. A page that yields under 400 characters is flagged `needs_render`.
 - Environment proxies are ignored (`trust_env=False`).
 - User-Agent `quick-read/<version> (+https://github.com/csakegyruszki/quick-read)`: no
