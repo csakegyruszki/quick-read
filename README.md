@@ -1,4 +1,5 @@
 # quick-read
+[![tests](https://github.com/csakegyruszki/quick-read/actions/workflows/tests.yml/badge.svg)](https://github.com/csakegyruszki/quick-read/actions/workflows/tests.yml)
 
 A single-URL reader for LLM agents: static fetch, clean text, SSRF guards on every hop, output marked as untrusted.
 
