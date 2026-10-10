@@ -6,6 +6,7 @@ import json
 import sys
 
 from .core import quick_read
+from .fallback import fetch_with_fallback
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,11 +15,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("url")
     ap.add_argument("--max-chars", type=int, default=20000)
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
+    ap.add_argument("--fallback", action="store_true",
+                    help="escalate through fallback tiers (UA switch, archives) when the plain read fails")
+    ap.add_argument("--render", action="store_true",
+                    help="with --fallback: allow a headless render tier (needs quick-read[render])")
     a = ap.parse_args(argv)
-    r = quick_read(a.url, a.max_chars)
+    if a.fallback:
+        r = fetch_with_fallback(a.url, max_chars=a.max_chars, render=a.render)
+    else:
+        r = quick_read(a.url, a.max_chars)
     if a.json:
         print(json.dumps(r, ensure_ascii=False))
     else:
+        if r.get("stale"):
+            print(f"[STALE: archive snapshot, {r['snapshot']['service']} {r['snapshot'].get('timestamp')}]")
         print(r.get("text") or json.dumps(r, ensure_ascii=False, indent=1))
     return 0 if r.get("ok") else 1
 

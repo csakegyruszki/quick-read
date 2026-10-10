@@ -48,6 +48,62 @@ python -m quick_read https://example.org/ --max-chars 5000
 python -m quick_read.mcp_server        # stdio MCP server, one tool: quick_read
 ```
 
+## Fallback fetching (opt-in)
+
+`quick_read()` stays a single static read. When a page is blocked or thin, `fetch_with_fallback()`
+escalates through tiers and stops at the first success. It is a separate call: nothing in
+`quick_read()` changes.
+
+```python
+from quick_read import fetch_with_fallback
+r = fetch_with_fallback("https://example.org/story")
+r["ok"], r["tier_used"], r["stale"], r["snapshot"], r["egress"]
+```
+
+```bash
+python -m quick_read https://example.org/story --fallback --json
+```
+
+| tier | what | timeout |
+|---|---|---|
+| T1 | HTTP + trafilatura. Tool User-Agent first; a browser-style User-Agent header only after a plain 401/403/406, never after a named challenge | 10 s |
+| T2 | the regular `quick_read` fetch and markdown extraction | 15 s |
+| T3 | headless render with crawl4ai, only with `render=True` and `pip install "quick-read[render]"` | 30 s |
+| T4 | archives: Wayback (availability API, retried with backoff, then the CDX index), then archive.today lookup | 30 s per request |
+
+- **Success** means at least 500 characters of extracted main text (`min_chars`) and not a
+  challenge page. The gate (`detect_challenge`) looks for interstitial wording in the title and the
+  start of the text, plus CAPTCHA and bot-wall markup on pages that carry little real text, and
+  treats a bare 401/403/429/503 as a block. A challenge page is never returned as content; the
+  call escalates, and if nothing works it returns `ok: False` with `error: "challenge:<label>"`.
+  It is a string heuristic, not a classifier: a page it misses comes back as content, and a real
+  page that discusses CAPTCHAs in a short text can be flagged.
+- **No CAPTCHA solving.** If archive.today answers with a challenge, that service is skipped
+  (`error: "challenge_skipped:<label>"`) and the attempt is recorded.
+- **Archive hits are stale.** `stale` is `True` and `snapshot` holds `{service, timestamp,
+  snapshot_url}`; the timestamp is the capture date, not today.
+- **Egress per attempt.** Every entry in `attempts` has `egress`, the hosts contacted for it
+  (redirect targets and, for T3, the hosts the browser called). `egress` at the top level is the
+  union. An archive attempt discloses the requested URL to the archive service; pass
+  `archives=False` where that is not acceptable.
+- **robots.txt (RFC 9309)** is checked before the live tiers (`respect_robots=True`); a disallowed
+  URL is not fetched live (`error: "robots_disallowed"`), a 5xx on robots.txt counts as disallowed,
+  a 4xx or an unreachable robots.txt as allowed. Archive copies are still looked up.
+- **Per-domain tier memory.** The tier (and User-Agent) that last worked for a domain is tried
+  first for 7 days; the other tiers still follow. A 429 sets a per-domain backoff from
+  `Retry-After`. Stored in `domain-memory.json`.
+- **24 h cache** of successful results (archive hits stay marked stale). Both files default to
+  `$QUICK_READ_STATE_DIR` or `~/.cache/quick-read`; set `cache_dir=` and `memory_path=`, or switch
+  them off with `use_cache=False` / `remember=False`. The cache is working storage, not evidence.
+- **Timeouts per tier:** `timeouts={1: 10, 2: 15, 3: 30, 4: 30}`. Requests to one domain are spaced
+  about one second apart (four seconds for archives).
+- The SSRF policy above applies to every hop of every tier. Output is wrapped and scored exactly
+  like `quick_read()`.
+
+Not included, on purpose: stealth or anti-detection browsers, CAPTCHA solving, Common Crawl.
+The browser-style User-Agent is a plain header change, not fingerprint spoofing; whether it is
+acceptable for a given site is your call.
+
 ## Result contract
 
 `quick_read(url, max_chars=20000, on_capture=None)` never raises.
@@ -99,7 +155,7 @@ python -m pytest -v                   # network tests skip, not pass, if the net
 python -m pytest -m "not network"     # offline guard tests only
 ```
 
-59 tests: 50 offline, 9 marked `network`; in the last run 56 passed and 3 network tests skipped. Guard tests use real addresses (127.0.0.1,
+110 tests: 101 offline, 9 marked `network`; in the last run all 110 passed. The 43 fallback tests in `tests/test_fallback.py` use recorded-shape responses and never touch the network. Guard tests use real addresses (127.0.0.1,
 10.0.0.1, 169.254.169.254, `[::ffff:127.0.0.1]`, 100.64.1.1, the NAT64, IPv4-compatible, 6to4 and
 Teredo forms, `file://`), not mocks.
 
