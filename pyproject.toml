@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp==1.30.0"]
 render = ["crawl4ai"]
+search = ["ddgs"]
 
 [project.urls]
 Homepage = "https://github.com/csakegyruszki/quick-read"

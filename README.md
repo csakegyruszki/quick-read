@@ -104,6 +104,95 @@ Not included, on purpose: stealth or anti-detection browsers, CAPTCHA solving, C
 The browser-style User-Agent is a plain header change, not fingerprint spoofing; whether it is
 acceptable for a given site is your call.
 
+## Search
+
+`quick_read.search` is a separate, standalone primitive: a federated web search that works without
+the page reader. It fans one query out to several backends in parallel threads, merges the answers and
+labels what it knows. Search hits are leads, not evidence: a hit says a URL was listed for a query,
+nothing about the page.
+
+```bash
+pip install "quick-read[search]"         # adds ddgs (DuckDuckGo)
+export QUICK_READ_SEARXNG_URL=http://localhost:8080   # optional: a SearXNG instance with format=json enabled
+python -m quick_read search "sanctions evasion networks" --k 10
+python -m quick_read search "sanctions evasion networks" --langs ru,he \
+    --translation ru="<your Russian translation>" --translation he="<your Hebrew translation>"
+```
+
+```python
+from quick_read.search import search, search_multi
+r = search("rust async runtime comparison", k=10)
+r = search_multi("sanctions evasion", langs=["ru"], translations={"ru": "<your translation>"})
+for e in r["results"]:
+    e["url"], e["title"], e["score"], e["sources"], e["publish_date"], e["date_source"], e.get("alt_urls")
+```
+
+- **Backends.** `ddgs` (optional extra), `searxng` (base URL in `QUICK_READ_SEARXNG_URL`, optional
+  `QUICK_READ_SEARXNG_ENGINES`) and `parallel` (the public, keyless Parallel Search MCP endpoint; checked
+  on 2026-10-10 to answer without a key). Parallel is not in the default set: the query goes to a third
+  party under its terms and rate limits, so name it with `backends=["parallel"]` or `--backends`.
+  The default set is every default backend that is available; `QUICK_READ_SEARCH_BACKENDS` overrides it.
+  With none available, `errors["backends"]` says so instead of returning an empty list silently.
+- **Your own backend.** `register_backend(name, fn, budget=, egress=, weight=, available=, default=)`, where
+  `fn(query, k, lang)` returns rows `{url, title, snippet}` (optionally `publish_date` with
+  `date_source: "engine"`). Modules listed in `QUICK_READ_SEARCH_PLUGINS` are imported once and may register
+  on import; importing runs their code, so list only modules you trust.
+- **Time budgets.** Every backend has its own budget (ddgs 8 s, searxng 6 s, parallel 8 s) and the whole
+  fan-out is capped at 10 s. A backend that overruns is dropped and reported in `errors`
+  (`timeout>6s (dropped)`); a backend that raises is recorded the same way. Neither fails the search.
+- **Merge.** Reciprocal Rank Fusion (k = 60) over normalised URLs (scheme, `www.`/`m.`/`amp.`, trailing
+  slash, fragment, tracking parameters and case ignored). Locale twins of one page (`/en/x`, `/ru/x`,
+  `?hl=en`) become one result: scores add up, the twin in the query language is shown, the rest are in
+  `alt_urls`. A hit found by one backend only that shares almost no terms with the query is scaled by 0.1
+  (`demoted: true`); the guard needs a query of at least three content terms and does not apply to
+  languages written without spaces.
+- **Dates.** `publish_date` + `date_source`: `engine` (the backend supplied it), `url` or `snippet`
+  (exactly one complete date, year first or English month names, not in the future), else `""` / `none`.
+  A snippet date is a lead: an agenda snippet names the meeting, not the publication.
+- **Cache.** Results are cached for 6 hours in `$QUICK_READ_STATE_DIR/search` or
+  `~/.cache/quick-read/search` (the key includes the backend set; failures are not cached;
+  `use_cache=False` / `--no-cache`). The directory holds query text.
+- **Multilingual.** `search_multi(query, langs, translations)` searches the query as written and once per
+  requested language, with the region or language each backend understands (a table of 55 ISO 639-1
+  codes), then merges the variants. **It does not translate.** The caller supplies `translations={lang: text}`;
+  an LLM agent calling this should pass its own translations, which are usually better than a machine
+  pipeline and cost no extra service. A requested language without a translation is listed in
+  `untranslated_langs` and not searched (the original query still runs); an optional
+  `translator(query, lang)` callable can fill gaps. At most five extra languages per call
+  (`skipped_langs`). Each result carries `lang`, `query_variant` and the `variants` that found it.
+- **Routes.** A route is a rule that recognises a query and answers it directly, for example an identifier
+  that maps to a canonical URL. `register_route(name, match, fn, egress=, budget=, weight=)`: `match(query)`
+  decides, `fn(query)` returns rows with a `conf` between 0 and 1. Route hits enter the merge with weight 4
+  (a rank-1 route hit outranks three backends agreeing on rank 1) and are never demoted. A route should
+  claim only what it checked. No routes ship with the package; this one is the whole interface:
+
+```python
+import re
+from quick_read.search import register_route
+
+PEP = re.compile(r"\bPEP[\s-]?(\d{1,4})\b", re.I)
+
+def match(query):
+    return bool(PEP.search(query))
+
+def run(query):
+    n = int(PEP.search(query).group(1))
+    # the URL is built from the number; nothing is fetched, so the snippet says so
+    return [{"url": f"https://peps.python.org/pep-{n:04d}/", "title": f"PEP {n}",
+             "snippet": "URL built from the PEP number, not checked", "conf": 0.8}]
+
+register_route("pep", match, run)       # egress=None: nothing leaves the machine at query time
+```
+
+- **Privacy.** Queries leave the machine: `egress` on each result names where (`duckduckgo`,
+  `searxng-instance`, `parallel`, `custom:<name>`, `direct:<host>` for a route that contacts a host,
+  `local` for one that does not). Backend requests use plain `httpx` with environment proxies honoured and
+  no address policy, because their endpoints are ones you configure or the fixed public one; the SSRF
+  guards above belong to the page reader.
+- **Limits.** Result quality is whatever the engines return; DuckDuckGo access through `ddgs` can be rate
+  limited or blocked and is the least stable backend. Requests to one backend are spaced one second apart.
+  Dates are never guessed beyond the rule above. Not measured here: ranking quality against any benchmark.
+
 ## Result contract
 
 `quick_read(url, max_chars=20000, on_capture=None)` never raises.
@@ -155,7 +244,7 @@ python -m pytest -v                   # network tests skip, not pass, if the net
 python -m pytest -m "not network"     # offline guard tests only
 ```
 
-110 tests: 101 offline, 9 marked `network`; in the last run all 110 passed. The 43 fallback tests in `tests/test_fallback.py` use recorded-shape responses and never touch the network. Guard tests use real addresses (127.0.0.1,
+207 tests: 198 offline, 9 marked `network`; in the last run all 207 passed. The 43 fallback tests in `tests/test_fallback.py` and the 97 search tests in `tests/test_search.py` use recorded-shape responses (the search merge tests use three real backends' ranked URL lists, `tests/fixtures/search_recorded_rows.json`) and never touch the network. Guard tests use real addresses (127.0.0.1,
 10.0.0.1, 169.254.169.254, `[::ffff:127.0.0.1]`, 100.64.1.1, the NAT64, IPv4-compatible, 6to4 and
 Teredo forms, `file://`), not mocks.
 

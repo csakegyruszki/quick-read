@@ -1,4 +1,4 @@
-"""CLI: python -m quick_read <url> [--json] [--max-chars N]"""
+"""CLI: python -m quick_read <url> [--json] [--max-chars N]   |   python -m quick_read search "<query>" [...]"""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,10 @@ from .fallback import fetch_with_fallback
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "search":
+        from .search import main as search_main
+        return search_main(argv[1:])
     ap = argparse.ArgumentParser(prog="quick_read",
                                  description="Read one static web page into clean text.")
     ap.add_argument("url")

@@ -10,6 +10,16 @@ Added
   `stale` plus the snapshot date for archive hits.
 - Optional extra `quick-read[render]` (crawl4ai) for a headless render tier; off unless `render=True`.
 - `tests/test_fallback.py`: 43 offline tests on recorded-shape responses.
+- `quick_read.search` (standalone, no page fetching involved): federated, multilingual web search.
+  Backends `ddgs` (optional extra `quick-read[search]`), `searxng` (`QUICK_READ_SEARXNG_URL`) and the
+  public keyless `parallel` endpoint (opt-in), plus `register_backend` for your own; per-backend time
+  budgets, URL normalisation, RRF merge, locale-twin collapse (`alt_urls`), a single-source relevance
+  guard, `publish_date` + `date_source` (engine / url / snippet / none), a 6 h cache, and
+  `search_multi(query, langs, translations)` with a 55-language ISO 639-1 region table. The caller
+  supplies the translations; nothing is translated for you. `register_route` is the interface for
+  rule-triggered direct lookups (none ship; one example is in the README).
+- CLI: `python -m quick_read search "query" --langs ru,he --translation ru="..."`.
+- `tests/test_search.py`: 97 offline tests.
 
 Unchanged
 - `quick_read()` and its guards behave as in 0.1.0.
