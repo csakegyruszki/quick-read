@@ -20,12 +20,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-chars", type=int, default=20000)
     ap.add_argument("--json", action="store_true", help="print the full result as JSON")
     ap.add_argument("--fallback", action="store_true",
-                    help="escalate through fallback tiers (UA switch, archives) when the plain read fails")
+                    help="escalate through fallback tiers (archives, optional render) when the plain read fails")
     ap.add_argument("--render", action="store_true",
                     help="with --fallback: allow a headless render tier (needs quick-read[render])")
+    ap.add_argument("--ua-fallback", action="store_true",
+                    help="with --fallback: retry with a browser-style User-Agent after a plain 401/403/406. "
+                         "May violate a site's wishes; use only where permitted")
     a = ap.parse_args(argv)
     if a.fallback:
-        r = fetch_with_fallback(a.url, max_chars=a.max_chars, render=a.render)
+        r = fetch_with_fallback(a.url, max_chars=a.max_chars, render=a.render,
+                                ua_fallback=a.ua_fallback)
     else:
         r = quick_read(a.url, a.max_chars)
     if a.json:

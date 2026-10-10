@@ -128,7 +128,7 @@ def test_t1_third_party_redirect_host_is_in_egress():
     assert r["ok"] and r["egress"] == [HOST, "cdn.other.example"]
 
 
-def test_ua_switch_after_plain_403(isolated):
+def test_ua_switch_after_plain_403_only_when_opted_in(isolated):
     seen = []
 
     def rules(ua):
@@ -137,11 +137,48 @@ def test_ua_switch_after_plain_403(isolated):
 
     net = Net(live_handler(ua_rules=rules))
     fb._http_get = net
-    r = run()
+    r = run(ua_fallback=True)
     assert r["ok"] and r["tier_used"] == 1
     assert seen == [fb.TOOL_UA, fb.BROWSER_UA]
     mem = json.loads((isolated / "state" / "domain-memory.json").read_text())
     assert mem[HOST]["ua"] == "browser" and mem[HOST]["tier"] == 1
+
+
+def test_no_ua_switch_by_default(isolated):
+    seen = []
+
+    def rules(ua):
+        seen.append(ua)
+        return resp(403, b"<html><title>Forbidden</title></html>") if ua == fb.TOOL_UA else resp(200, ARTICLE)
+
+    fb._http_get = Net(live_handler(ua_rules=rules))
+    r = run(archives=False)
+    assert not r["ok"]
+    assert seen == [fb.TOOL_UA]          # the browser UA is never sent unless ua_fallback=True
+
+
+def test_remembered_browser_ua_is_ignored_without_opt_in(isolated):
+    (isolated / "state").mkdir()
+    (isolated / "state" / "domain-memory.json").write_text(json.dumps(
+        {HOST: {"tier": 1, "ua": "browser", "last_ok": time.time(), "ok": 1}}))
+    seen = []
+
+    def rules(ua):
+        seen.append(ua)
+        return resp(200, ARTICLE)
+
+    fb._http_get = Net(live_handler(ua_rules=rules))
+    assert run(use_cache=False)["ok"]
+    assert seen == [fb.TOOL_UA]
+
+
+def test_cli_ua_fallback_flag_is_off_unless_given(monkeypatch):
+    import quick_read.__main__ as m
+    got = []
+    monkeypatch.setattr(m, "fetch_with_fallback", lambda url, **kw: got.append(kw) or {"ok": True, "text": "x"})
+    m.main(["https://example.org/", "--fallback"])
+    m.main(["https://example.org/", "--fallback", "--ua-fallback"])
+    assert [g["ua_fallback"] for g in got] == [False, True]
 
 
 def test_no_ua_switch_after_named_challenge():
@@ -153,7 +190,7 @@ def test_no_ua_switch_after_named_challenge():
 
     net = Net(live_handler(ua_rules=rules))
     fb._http_get = net
-    r = run(archives=False)
+    r = run(archives=False, ua_fallback=True)
     assert not r["ok"]
     assert seen == [fb.TOOL_UA]          # one request: the browser UA was NOT tried
     assert "interstitial" in r["challenge"]["seen"]
@@ -331,11 +368,43 @@ def test_robots_disallow_without_archives_is_an_error():
     assert r["ok"] is False and r["error"] == "robots_disallowed" and URL not in net.urls()
 
 
-def test_robots_5xx_is_treated_as_disallow():
-    net = Net(lambda url, ua: resp(503, b"") if robots_404(url) else resp(200, ARTICLE))
+@pytest.mark.parametrize("robots_answer", [
+    resp(500, b""), resp(503, b""), resp(599, b""),                       # RFC 9309 2.3.1.4: server error
+    resp(0, b"", error="connect_error"), resp(0, b"", error="timeout"),    # ... or network error
+    resp(0, b"", error="tls_error"), resp(0, b"", error="too_many_redirects"),
+    resp(0, b"", error="blocked_address"),                                 # redirect into a private address
+    resp(302, b""),                                                        # a redirect we cannot follow
+], ids=lambda r: str(r["status"] or r["error"]))
+def test_robots_unreachable_means_complete_disallow(robots_answer):
+    robots_answer["status"] = robots_answer["status"] or None
+    net = Net(lambda url, ua: dict(robots_answer) if robots_404(url) else resp(200, ARTICLE))
     fb._http_get = net
     r = run(archives=False)
-    assert r["ok"] is False and URL not in net.urls()
+    assert r["ok"] is False and r["error"] == "robots_disallowed" and URL not in net.urls()
+    assert [a for a in r["attempts"] if a["tier"] == "robots"][0]["robots"] == "unreachable"
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 429, 451])
+def test_robots_4xx_means_unavailable_so_allowed(status):
+    # RFC 9309 2.3.1.3: any 4xx = no robots.txt, the crawler MAY access anything
+    net = Net(lambda url, ua: resp(status, b"") if robots_404(url) else resp(200, ARTICLE))
+    fb._http_get = net
+    r = run(archives=False)
+    assert r["ok"] is True and URL in net.urls()
+    assert [a for a in r["attempts"] if a["tier"] == "robots"][0]["robots"] == "unavailable"
+
+
+def test_robots_unreachable_verdict_is_retried_after_a_short_ttl(monkeypatch):
+    state = {"robots": resp(503, b"")}
+    net = Net(lambda url, ua: dict(state["robots"]) if robots_404(url) else resp(200, ARTICLE))
+    fb._http_get = net
+    assert run(archives=False, use_cache=False, remember=False)["ok"] is False
+    now = time.time()
+    monkeypatch.setattr(fb.time, "time", lambda: now + fb.ROBOTS_UNREACHABLE_TTL_S - 1)
+    assert run(archives=False, use_cache=False, remember=False)["ok"] is False      # still cached
+    monkeypatch.setattr(fb.time, "time", lambda: now + fb.ROBOTS_UNREACHABLE_TTL_S + 1)
+    state["robots"] = resp(404, b"")
+    assert run(archives=False, use_cache=False, remember=False)["ok"] is True       # asked again, now allowed
 
 
 def test_robots_can_be_ignored_explicitly():
@@ -437,6 +506,172 @@ def test_render_tier_records_third_party_egress(monkeypatch):
     assert r["ok"] and r["tier_used"] == 3
     a3 = [a for a in r["attempts"] if a["tier"] == 3][0]
     assert a3["egress"] == [HOST, "tracker.example.net"] and "tracker.example.net" in r["egress"]
+
+
+def test_render_redirected_to_a_private_address_is_rejected(monkeypatch):
+    """An allowed entry URL whose render ends on 127.0.0.1 / the metadata address: content dropped."""
+    fb._http_get = Net(live_handler(resp(403, b"<html><title>Forbidden</title></html>")))
+    secret = "<html><body><article>" + "internal secret " * 80 + "</article></body></html>"
+    for target in ("http://127.0.0.1:8080/admin", "http://169.254.169.254/latest/meta-data/"):
+        monkeypatch.setattr(core, "_check_host", lambda url: (
+            {"error": "BLOCKED_ADDRESS", "message": "not public"} if fb.urlparse(url).hostname in ("127.0.0.1", "169.254.169.254")
+            else None))
+        monkeypatch.setattr(fb, "_render", lambda url, t, target=target: {
+            "html": secret, "status": 200, "final_url": target, "success": True, "hosts": [HOST], "blocked": []})
+        r = run(render=True, archives=False, use_cache=False, remember=False)
+        assert r["ok"] is False and r["text"] == "", target
+        a3 = [a for a in r["attempts"] if a["tier"] == 3][0]
+        assert a3["error"] == "render_blocked_address" and a3["chars"] == 0
+        assert "internal secret" not in json.dumps(r)
+
+
+def test_render_with_a_refused_main_frame_navigation_is_rejected(monkeypatch):
+    """The guard aborted a redirect hop / JS navigation: whatever the browser shows instead is not returned."""
+    fb._http_get = Net(live_handler(resp(403, b"<html><title>Forbidden</title></html>")))
+    monkeypatch.setattr(fb, "_render", lambda url, t: {
+        "html": ARTICLE.decode(), "status": 200, "final_url": URL, "success": True, "hosts": [HOST],
+        "blocked": [{"url": "http://127.0.0.1/x", "host": "127.0.0.1", "error": "BLOCKED_ADDRESS",
+                     "navigation": True, "main_frame": True}]})
+    r = run(render=True, archives=False, use_cache=False, remember=False)
+    assert r["ok"] is False
+    assert [a for a in r["attempts"] if a["tier"] == 3][0]["error"] == "render_blocked_address"
+
+
+def test_render_private_subresource_is_aborted_and_recorded_not_returned_as_egress(monkeypatch):
+    fb._http_get = Net(live_handler(resp(403, b"<html><title>Forbidden</title></html>")))
+    monkeypatch.setattr(fb, "_render", lambda url, t: {
+        "html": ARTICLE.decode(), "status": 200, "final_url": URL, "success": True, "hosts": [HOST],
+        "blocked": [{"url": "http://10.0.0.5/pixel.png", "host": "10.0.0.5", "error": "BLOCKED_ADDRESS",
+                     "navigation": False, "main_frame": True}]})
+    r = run(render=True, archives=False, use_cache=False, remember=False)
+    assert r["ok"] and r["tier_used"] == 3
+    a3 = [a for a in r["attempts"] if a["tier"] == 3][0]
+    assert a3["blocked"] == [{"host": "10.0.0.5", "error": "BLOCKED_ADDRESS", "navigation": False}]
+    assert "10.0.0.5" not in r["egress"]
+
+
+# ---- the route guard itself (the hook that crawl4ai/Playwright runs for every browser request)
+class _Frame:
+    def __init__(self, main):
+        self.parent_frame = None if main else object()
+
+
+class _Req:
+    def __init__(self, url, nav=False, main=True):
+        self.url, self._nav, self.frame = url, nav, _Frame(main)
+
+    def is_navigation_request(self):
+        return self._nav
+
+
+class _Resp:
+    def __init__(self, status=200, location=None):
+        self.status, self.headers = status, ({"location": location} if location else {})
+
+
+class _Route:
+    def __init__(self, req, resp=None):
+        self.request, self._resp, self.did = req, resp, []
+
+    async def fetch(self, **kw):
+        assert kw == {"max_redirects": 0}      # never let Playwright follow a redirect for us
+        return self._resp
+
+    async def fallback(self):
+        self.did.append("fallback")
+
+    async def abort(self, reason="failed"):
+        self.did.append(f"abort:{reason}")
+
+    async def fulfill(self, **kw):
+        self.did.append("fulfill")
+
+
+def _guard_check(url):
+    return None if fb.urlparse(url).hostname.endswith(".example") else {"error": "BLOCKED_ADDRESS", "message": "x"}
+
+
+def _drive(req, resp=None):
+    import asyncio
+    blocked, redirects = [], []
+    route = _Route(req, resp)
+    asyncio.run(fb._make_route_guard(blocked, redirects, check=_guard_check)(route))
+    return route.did, blocked, redirects
+
+
+def test_guard_aborts_private_subresources_and_passes_public_ones():
+    assert _drive(_Req("http://169.254.169.254/latest/meta-data/"))[0] == ["abort:blockedbyclient"]
+    did, blocked, _ = _drive(_Req("http://127.0.0.1:9/pixel.gif"))
+    assert did == ["abort:blockedbyclient"] and blocked[0]["host"] == "127.0.0.1" and blocked[0]["navigation"] is False
+    assert _drive(_Req("https://cdn.static.example/app.js"))[0] == ["fallback"]
+    assert _drive(_Req("data:image/png;base64,AAAA"))[0] == ["fallback"]      # no network involved
+
+
+def test_guard_refuses_a_navigation_redirect_to_a_private_address_before_it_is_requested():
+    did, blocked, redirects = _drive(_Req("https://a.example/", nav=True), _Resp(302, "http://127.0.0.1:8080/admin"))
+    assert did == ["abort:blockedbyclient"] and redirects == []
+    assert blocked == [{"url": "http://127.0.0.1:8080/admin", "host": "127.0.0.1", "error": "BLOCKED_ADDRESS",
+                        "navigation": True, "main_frame": True}]
+    did, blocked, _ = _drive(_Req("https://a.example/", nav=True), _Resp(301, "/elsewhere"))      # relative: stays on a.example
+    assert did == ["abort:aborted"]
+
+
+def test_guard_hands_a_safe_main_frame_redirect_back_for_a_fresh_guarded_request():
+    did, blocked, redirects = _drive(_Req("https://a.example/old", nav=True), _Resp(302, "/new"))
+    assert did == ["abort:aborted"] and redirects == ["https://a.example/new"] and blocked == []
+
+
+def test_guard_passes_a_non_redirect_navigation_through():
+    assert _drive(_Req("https://a.example/", nav=True), _Resp(200))[0] == ["fulfill"]
+
+
+def test_guard_checks_the_first_hop_of_an_iframe_redirect():
+    did, blocked, _ = _drive(_Req("https://a.example/f", nav=True, main=False), _Resp(302, "http://10.1.1.1/"))
+    assert did == ["abort:blockedbyclient"] and blocked[0]["main_frame"] is False
+    assert _drive(_Req("https://a.example/f", nav=True, main=False), _Resp(302, "https://b.example/"))[0] == ["fulfill"]
+
+
+def test_guard_fails_closed_when_the_check_itself_raises():
+    import asyncio
+
+    def boom(url):
+        raise RuntimeError("dns exploded")
+
+    route = _Route(_Req("https://a.example/x"))
+    asyncio.run(fb._make_route_guard([], [], check=boom)(route))
+    assert route.did == ["abort:blockedbyclient"]
+
+
+def test_render_refuses_to_run_without_an_installed_guard(monkeypatch):
+    """If crawl4ai never calls our hook (API change), the result must be discarded, not returned unguarded."""
+    import sys
+    import types
+
+    class Res:
+        html, status_code, redirected_url, success, error_message, network_requests = "<p>x</p>", 200, "", True, "", []
+
+    class Strategy:
+        def set_hook(self, name, fn):
+            pass                                 # silently never runs it
+
+    class Crawler:
+        def __init__(self, config=None):
+            self.crawler_strategy = Strategy()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def arun(self, url, config=None):
+            return Res()
+
+    mod = types.SimpleNamespace(AsyncWebCrawler=Crawler, BrowserConfig=lambda **k: None, CacheMode=types.SimpleNamespace(BYPASS=0),
+                                CrawlerRunConfig=lambda **k: None)
+    monkeypatch.setitem(sys.modules, "crawl4ai", mod)
+    r = fb._render(URL, 2.0)
+    assert r["error"] == "render_guard_not_installed" and "html" not in r
 
 
 def test_render_without_the_extra_degrades_cleanly(monkeypatch):

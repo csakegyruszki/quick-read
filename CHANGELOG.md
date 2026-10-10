@@ -9,7 +9,15 @@ Added
   robots.txt, per-domain tier memory, a 24 h cache, per-tier timeouts, `egress` per attempt and
   `stale` plus the snapshot date for archive hits.
 - Optional extra `quick-read[render]` (crawl4ai) for a headless render tier; off unless `render=True`.
-- `tests/test_fallback.py`: 43 offline tests on recorded-shape responses.
+  Every browser request is checked against the SSRF policy and aborted when it fails; main-frame
+  redirects are checked hop by hop before they are requested; a render that ends on a non-public
+  address is discarded. Limits (subresource redirects, DNS rebinding, WebSockets) are in the README.
+- `ua_fallback=False` / `--ua-fallback`: the browser-style User-Agent retry after a plain 401/403/406 is
+  opt-in.
+- robots.txt follows RFC 9309 section 2.3.1: 4xx = unavailable (allowed); 5xx or a network error =
+  unreachable (complete disallow).
+- `tests/test_fallback.py`: offline tests on recorded-shape responses; `tests/test_render_guard_browser.py`
+  checks the render guard against a real browser (skipped when crawl4ai is not installed).
 - `quick_read.search` (standalone, no page fetching involved): federated, multilingual web search.
   Backends `ddgs` (optional extra `quick-read[search]`), `searxng` (`QUICK_READ_SEARXNG_URL`) and the
   public keyless `parallel` endpoint (opt-in), plus `register_backend` for your own; per-backend time

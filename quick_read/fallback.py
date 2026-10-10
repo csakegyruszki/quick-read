@@ -5,11 +5,13 @@
 
 Tiers, in order:
 
-  T1  HTTP + trafilatura. The tool User-Agent first; a browser-style User-Agent only after a plain
-      401/403/406 (never after a named challenge).                                   timeout 10 s
+  T1  HTTP + trafilatura with the tool User-Agent. With ``ua_fallback=True`` (off by default) a
+      browser-style User-Agent is tried after a plain 401/403/406 (never after a named challenge).
+                                                                                     timeout 10 s
   T2  The regular quick_read path (same fetcher, same markdown extraction).          timeout 15 s
   T3  Headless render (crawl4ai). OFF by default; needs ``pip install quick-read[render]``
-      and ``render=True``.                                                           timeout 30 s
+      and ``render=True``. Every request the browser makes (redirect hops and subresources) is
+      checked against the SSRF policy and aborted when it fails it.                   timeout 30 s
   T4  Archives: Wayback (availability API, retried, then the CDX index) and archive.today
       (lookup only; a challenge page is detected and skipped, never solved).         timeout 30 s/request
 
@@ -18,7 +20,9 @@ A challenge or block page is never returned as content: the ladder escalates ins
 
 Every attempt records ``egress``: the hosts that were contacted for it. Archive hits are marked
 ``stale=True`` with the snapshot date. robots.txt (RFC 9309) is checked before the live tiers; a
-disallowed URL is not fetched live. Archive copies are third-party copies and are still looked up.
+disallowed URL is not fetched live, and a robots.txt that is unreachable (5xx, network error) counts as
+"disallow all" (RFC 9309 section 2.3.1.4); a 4xx counts as "no robots.txt" (section 2.3.1.3). Archive
+copies are third-party copies and are still looked up.
 
 State (both optional and configurable): a 24 h result cache and a per-domain tier memory.
 The cache is temporary working storage, not an evidence store.
@@ -214,26 +218,42 @@ _robots: dict[str, tuple[float, object]] = {}
 _robots_lock = threading.Lock()
 
 
+ROBOTS_TTL_S = 3600.0
+ROBOTS_UNREACHABLE_TTL_S = 300.0   # a transient failure must not lock a host out for a whole hour
+
+
+def _robots_classify(r: dict):
+    """robots.txt fetch result -> (rules, outcome) per RFC 9309 section 2.3.1.
+
+    * 2xx (after redirects)  -> parse the body                              outcome "ok"
+    * 4xx                    -> "unavailable": the crawler MAY access anything   "unavailable"
+    * 5xx, network error, anything else -> "unreachable": MUST assume complete disallow   "unreachable"
+    """
+    st = r.get("status")
+    if r.get("error") is None and st is not None and 200 <= st < 300:
+        rp = robotparser.RobotFileParser()
+        rp.parse(r["body"].decode("utf-8", errors="replace").splitlines())
+        return rp, "ok"
+    if r.get("error") is None and st is not None and 400 <= st < 500:
+        return None, "unavailable"
+    return "DISALLOW", "unreachable"
+
+
 def _robots_allows(run: _Run, url: str) -> bool:
     p = urlparse(url)
     key = f"{p.scheme}://{p.netloc}"
     with _robots_lock:
         hit = _robots.get(key)
-        fresh = hit is not None and time.time() - hit[0] < 3600
+        fresh = hit is not None and time.time() - hit[0] < (
+            ROBOTS_UNREACHABLE_TTL_S if hit[1] == "DISALLOW" else ROBOTS_TTL_S)
     if not fresh:
         run.polite(p.hostname or "")
         t0 = time.perf_counter()
         r = _http_get(key + "/robots.txt", ua=ROBOTS_UA, timeout=10.0)
-        rp: object = None
         st = r.get("status")
-        if r.get("error") is None and st == 200:
-            rp = robotparser.RobotFileParser()
-            rp.parse(r["body"].decode("utf-8", errors="replace").splitlines())
-        elif r.get("error") is None and st is not None and st >= 500:
-            rp = "DISALLOW"
-        # 4xx -> no robots file (allow); unreachable robots.txt -> allow (origin errors show up in the tiers)
+        rp, outcome = _robots_classify(r)
         run.attempt("robots", "robots.txt", r.get("hosts") or [run.host], ok=rp != "DISALLOW", status=st,
-                    error=r.get("error"), ms=round((time.perf_counter() - t0) * 1000))
+                    error=r.get("error"), robots=outcome, ms=round((time.perf_counter() - t0) * 1000))
         with _robots_lock:
             _robots[key] = (time.time(), rp)
     else:
@@ -316,10 +336,12 @@ def _retry_after(headers: dict) -> float:
         return 60.0
 
 
-def _t1(run: _Run, min_chars: int) -> dict | None:
-    order = [("tool", TOOL_UA), ("browser", BROWSER_UA)]
-    if run.mem.get("ua") == "browser":
-        order.reverse()
+def _t1(run: _Run, min_chars: int, ua_fallback: bool = False) -> dict | None:
+    order = [("tool", TOOL_UA)]
+    if ua_fallback:   # a browser-style UA is a bot-evasion step: only on explicit opt-in
+        order.append(("browser", BROWSER_UA))
+        if run.mem.get("ua") == "browser":
+            order.reverse()
     for name, ua in order:
         run.polite(run.host)
         t0 = time.perf_counter()
@@ -336,7 +358,7 @@ def _t1(run: _Run, min_chars: int) -> dict | None:
         if content:
             run.ua_used = name
             return content
-        # The second UA is tried only after a plain access-denied (a User-Agent filter). A named
+        # The second UA (opt-in only) is tried after a plain access-denied (a User-Agent filter). A named
         # challenge is never "worked around" by changing the UA - it escalates instead.
         named_challenge = a.get("challenge") and not str(a["challenge"]).startswith("http_")
         if r["status"] not in BLOCK_STATUS_SWITCH_UA or run.terminal or named_challenge:
@@ -379,10 +401,96 @@ def _t2(run: _Run, min_chars: int) -> dict | None:
                   charset=r["charset"], ms=ms, extractor=_extract_md, min_chars=min_chars)
 
 
+_LOCAL_SCHEMES = ("data", "blob", "about")      # no network involved
+
+
+def _make_route_guard(blocked: list, redirects: list | None = None, check=None):
+    """Playwright route handler: abort requests whose URL fails the SSRF policy.
+
+    Registered on the page before navigation. Every request the browser issues is checked: the entry
+    request, JS-initiated navigations, iframes, images, scripts, XHR/fetch. ``blocked`` collects
+    {url, host, error, navigation, main_frame} for each refused request.
+
+    Redirects: Playwright routes only the FIRST request of a redirect chain, so the browser must never be
+    allowed to follow a redirect on its own. A navigation request is fetched without following redirects
+    (``route.fetch(max_redirects=0)``) and its ``Location`` is checked before anything is requested from it:
+      * main frame   -> the request is aborted and the safe target is appended to ``redirects``; the caller
+                        navigates to it as a fresh, guarded request (one such step per hop);
+      * other frames -> the 3xx is passed on; only the first hop is checked.
+    Not covered (a limit of the browser API): the redirect of a SUBRESOURCE (image, script, XHR) is not
+    inspected, so the browser can send one blind GET to a redirect target; the page cannot read the answer.
+    A DNS rebinding answer that changes between this check and the browser's own lookup is not covered either.
+    The verdict per origin is made once per render (cached), off the event loop.
+    """
+    import asyncio
+    check = check or _core._check_host
+    cache: dict = {}
+    redirects = redirects if redirects is not None else []
+
+    async def verdict(url: str):
+        p = urlparse(url)
+        key = (p.scheme.lower(), (p.hostname or "").lower(), p.port)
+        if key not in cache:
+            try:
+                cache[key] = await asyncio.to_thread(check, url)
+            except Exception as e:  # noqa: BLE001 - fail closed
+                cache[key] = {"error": "CHECK_FAILED", "message": type(e).__name__}
+        return key, cache[key]
+
+    def refuse(url: str, key, bad, nav: bool, main: bool) -> None:
+        blocked.append({"url": url[:200], "host": key[1], "error": str(bad.get("error")),
+                        "navigation": nav, "main_frame": main})
+
+    async def handler(route) -> None:
+        req = route.request
+        url = req.url
+        if urlparse(url).scheme.lower() in _LOCAL_SCHEMES:
+            await route.fallback()
+            return
+        try:
+            nav = bool(req.is_navigation_request())
+            main = req.frame.parent_frame is None
+        except Exception:  # noqa: BLE001 - treat an unknown request as the worst case
+            nav, main = True, True
+        key, bad = await verdict(url)
+        if bad:
+            refuse(url, key, bad, nav, main)
+            await route.abort("blockedbyclient")
+            return
+        if not nav:
+            await route.fallback()
+            return
+        try:
+            resp = await route.fetch(max_redirects=0)
+        except Exception:  # noqa: BLE001 - the navigation fails exactly as it would have
+            await route.abort("failed")
+            return
+        loc = resp.headers.get("location")
+        if loc and 300 <= resp.status < 400:
+            target = urljoin(url, loc)
+            tkey, tbad = await verdict(target)
+            if tbad:
+                refuse(target, tkey, tbad, nav, main)
+                await route.abort("blockedbyclient")
+                return
+            if main:
+                redirects.append(target)
+                await route.abort("aborted")
+                return
+        await route.fulfill(response=resp)
+
+    return handler
+
+
 def _render(url: str, timeout: float) -> dict:
     """Headless render with crawl4ai (optional extra). One browser per call; never raises.
 
-    -> {html, status, final_url, hosts, success, error_message} or {error, message}.
+    A route guard is installed on the page before navigation (crawl4ai hook ``on_page_context_created``):
+    requests to hosts that fail the SSRF policy are aborted, and main-frame redirects are followed one hop
+    at a time, each hop checked before it is requested (see ``_make_route_guard`` for what stays uncovered).
+    If the guard cannot be installed the render is refused (fail closed).
+
+    -> {html, status, final_url, hosts, blocked, success, error_message} or {error, message}.
     """
     try:
         import asyncio
@@ -392,20 +500,48 @@ def _render(url: str, timeout: float) -> dict:
         return {"error": "render_unavailable", "message": "install the extra: pip install quick-read[render]"}
 
     async def _go() -> dict:
+        blocked: list[dict] = []
+        redirects: list[str] = []
+        installed: list[int] = []
+        guard = _make_route_guard(blocked, redirects)
+
+        async def _install(page, context=None, **kwargs):
+            await page.route("**/*", guard)
+            installed.append(1)
+            return page
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout + 4
+        cur, hops, seen_urls = url, 0, []
         async with AsyncWebCrawler(config=BrowserConfig(headless=True, verbose=False)) as crawler:
-            cfg = CrawlerRunConfig(page_timeout=int(timeout * 1000), cache_mode=CacheMode.BYPASS, verbose=False,
-                                   capture_network_requests=True)
-            res = await asyncio.wait_for(crawler.arun(url=url, config=cfg), timeout + 4)
+            crawler.crawler_strategy.set_hook("on_page_context_created", _install)
+            while True:
+                redirects.clear()
+                cfg = CrawlerRunConfig(page_timeout=int(timeout * 1000), cache_mode=CacheMode.BYPASS,
+                                       verbose=False, capture_network_requests=True)
+                res = await asyncio.wait_for(crawler.arun(url=cur, config=cfg), max(1.0, deadline - loop.time()))
+                seen_urls += [ev["url"] for ev in (getattr(res, "network_requests", None) or [])
+                              if isinstance(ev, dict) and ev.get("event_type", "request") == "request"
+                              and ev.get("url")]
+                if not redirects:
+                    break
+                hops += 1
+                if hops > MAX_HOPS:
+                    return {"error": "too_many_redirects", "message": f"more than {MAX_HOPS} redirects"}
+                cur = redirects[0]
+        if not installed:
+            return {"error": "render_guard_not_installed",
+                    "message": "the request guard did not run; the render result was discarded"}
+        refused = {b["host"] for b in blocked}
         hosts: list[str] = []
-        for ev in (getattr(res, "network_requests", None) or []):
-            if isinstance(ev, dict) and ev.get("event_type", "request") == "request" and ev.get("url"):
-                h = (urlparse(str(ev["url"])).hostname or "").lower()
-                if h and h not in hosts:
-                    hosts.append(h)
+        for u in seen_urls:
+            h = (urlparse(str(u)).hostname or "").lower()
+            if h and h not in hosts and h not in refused:   # an aborted request contacted nobody
+                hosts.append(h)
         return {"html": str(getattr(res, "html", "") or ""), "status": getattr(res, "status_code", None),
-                "final_url": str(getattr(res, "redirected_url", "") or url),
+                "final_url": str(getattr(res, "redirected_url", "") or cur),
                 "success": bool(getattr(res, "success", True)),
-                "error_message": getattr(res, "error_message", ""), "hosts": hosts}
+                "error_message": getattr(res, "error_message", ""), "hosts": hosts, "blocked": blocked}
 
     try:
         # a private thread, so this also works when the caller already runs an event loop
@@ -416,7 +552,7 @@ def _render(url: str, timeout: float) -> dict:
 
 
 def _t3(run: _Run, min_chars: int) -> dict | None:
-    bad = _core._check_host(run.url)   # the browser follows redirects itself: only the entry host is checked
+    bad = _core._check_host(run.url)
     a = run.attempt(3, "render+trafilatura", [run.host])
     if bad:
         a["error"] = bad["error"].lower()
@@ -427,6 +563,21 @@ def _t3(run: _Run, min_chars: int) -> dict | None:
     ms = round((time.perf_counter() - t0) * 1000)
     if r.get("error"):
         a.update(error=r["error"], ms=ms, status=None, chars=0)
+        return None
+    blocked = r.get("blocked") or []
+    if blocked:
+        a["blocked"] = [{k: b.get(k) for k in ("host", "error", "navigation")} for b in blocked][:20]
+    # The browser follows redirects itself. The route guard already refused every hop that fails the SSRF
+    # policy; here the page that is actually delivered is checked once more, and a refused main-frame
+    # navigation (a redirect hop, a JS redirect) discards the render.
+    final_url = r.get("final_url") or run.url
+    bad_final = _core._check_host(final_url)
+    refused_nav = next((b for b in blocked if b.get("navigation") and b.get("main_frame", True)), None)
+    if bad_final or refused_nav:
+        what = bad_final["error"] if bad_final else refused_nav.get("error", "BLOCKED_ADDRESS")
+        a.update(error=f"render_{str(what).lower()}", ms=ms, status=None, chars=0,
+                 message="the render was redirected to an address that fails the SSRF policy; "
+                         "the content was discarded")
         return None
     for h in r.get("hosts") or []:   # everything the page made the browser contact, third parties included
         run.add_egress(h)
@@ -440,7 +591,7 @@ def _t3(run: _Run, min_chars: int) -> dict | None:
             run.challenges.append(f"http_{st}")
         return None
     return _judge(run, a, raw=html.encode("utf-8"), ctype="text/html", status=r.get("status"),
-                  final_url=r.get("final_url") or run.url, charset="utf-8", ms=ms, min_chars=min_chars)
+                  final_url=final_url, charset="utf-8", ms=ms, min_chars=min_chars)
 
 
 # ----------------------------------------------------------------------------- T4 archives
@@ -732,11 +883,13 @@ def _shape(url: str, text: str, max_chars: int, base: dict) -> dict:
 def fetch_with_fallback(url: str, *, max_chars: int = 20000, archives: bool = True, render: bool = False,
                         respect_robots: bool = True, min_chars: int = MIN_CHARS,
                         timeouts: dict | None = None, use_cache: bool = True, cache_dir=None,
-                        cache_ttl: float = CACHE_TTL_S, memory_path=None, remember: bool = True) -> dict:
+                        cache_ttl: float = CACHE_TTL_S, memory_path=None, remember: bool = True,
+                        ua_fallback: bool = False) -> dict:
     """Read one page, escalating through fallback tiers. Never raises.
 
     ``archives`` enables T4 (Wayback, archive.today); ``render`` enables T3 (needs the ``render``
-    extra). ``cache_dir`` and ``memory_path`` default to ``$QUICK_READ_STATE_DIR`` or
+    extra). ``ua_fallback`` (default False) allows a second try with a browser-style User-Agent after
+    a plain 401/403/406; that may violate a site's wishes - enable it only where it is permitted. ``cache_dir`` and ``memory_path`` default to ``$QUICK_READ_STATE_DIR`` or
     ``~/.cache/quick-read``; ``use_cache=False`` / ``remember=False`` switch them off.
 
     Success: ``ok=True`` with ``text`` (wrapped as untrusted), ``tier_used``, ``method``, ``stale``
@@ -754,7 +907,8 @@ def fetch_with_fallback(url: str, *, max_chars: int = 20000, archives: bool = Tr
         cdir = None if not use_cache else Path(cache_dir) if cache_dir is not None else state / "cache"
         mpath = None if not remember else Path(memory_path) if memory_path is not None else state / "domain-memory.json"
         tmo = {**DEFAULT_TIMEOUTS, **(timeouts or {})}
-        res = _run(url, max_chars, archives, render, respect_robots, min_chars, tmo, cdir, cache_ttl, mpath)
+        res = _run(url, max_chars, archives, render, respect_robots, min_chars, tmo, cdir, cache_ttl, mpath,
+                   ua_fallback)
     except Exception as e:  # noqa: BLE001 - the public function must not raise
         res = {"ok": False, "url": url, "error": f"internal:{type(e).__name__}: {e}"[:200], "attempts": [],
                "egress": [], "tier_used": None}
@@ -762,7 +916,8 @@ def fetch_with_fallback(url: str, *, max_chars: int = 20000, archives: bool = Tr
     return res
 
 
-def _run(url, max_chars, archives, render, respect_robots, min_chars, tmo, cdir, cache_ttl, mpath) -> dict:
+def _run(url, max_chars, archives, render, respect_robots, min_chars, tmo, cdir, cache_ttl, mpath,
+         ua_fallback=False) -> dict:
     hit = _cache_get(cdir, url, cache_ttl)
     if hit:
         text = hit.pop("text")
@@ -789,7 +944,7 @@ def _run(url, max_chars, archives, render, respect_robots, min_chars, tmo, cdir,
         if not live_ok:
             run.attempt("live", "skipped", [], error="robots_disallowed")
     if live_ok:
-        fns = {1: _t1, 2: _t2, 3: _t3}
+        fns = {1: lambda r, m: _t1(r, m, ua_fallback), 2: _t2, 3: _t3}
         for t in order:
             content = fns[t](run, min_chars)
             if content:
