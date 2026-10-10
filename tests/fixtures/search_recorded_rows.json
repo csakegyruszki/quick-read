@@ -1,0 +1,43 @@
+{
+ "_note": "Ranked URL lists returned by three backends for one English query on 2026-10-10 (URLs only; titles and snippets were not recorded).",
+ "query": "Treasury expands sanctions on Russia: key sectors, evasion, military supplies",
+ "recorded": "2026-10-10",
+ "ranked": {
+  "parallel": [
+   "https://home.treasury.gov/news/press-releases/jy1296",
+   "https://home.treasury.gov/news/press-releases/jy0692",
+   "https://home.treasury.gov/news/press-releases/jy2785",
+   "https://home.treasury.gov/news/press-releases/jy1494",
+   "https://home.treasury.gov/news/press-releases/jy0771",
+   "https://www.kyivpost.com/post/86402",
+   "https://www.congress.gov/crs-product/R48052",
+   "https://home.treasury.gov/news/press-releases/sb0644",
+   "https://www.consilium.europa.eu/en/policies/sanctions-against-russia-explained/",
+   "https://www.congress.gov/congressional-record/volume-172/issue-123/senate-section/article/S4288-4"
+  ],
+  "ddgs": [
+   "https://home.treasury.gov/news/press-releases/jy1296",
+   "https://www.hsfkramer.com/notes/sanctions/2023-02/treasury-expands-and-intensifies-sanctions-against-russia-by-targeting-key-sectors-evasion-efforts-and-military-supplies",
+   "https://www.lexology.com/library/detail.aspx?g=e2fe3168-f266-422d-9f62-1682147ea322",
+   "https://www.i-law.com/ilaw/doc/view.htm?id=432869",
+   "https://2021-2025.state.gov/holding-russia-and-belarus-to-account/",
+   "https://report.az/en/other-countries/us-expands-sanctions-against-russia/",
+   "https://thelaundrynews.com/category/u-s-department-of-the-treasury/page/2/",
+   "https://www.ropesgray.com/en/insights/alerts/2023/02/russia-ukraine-crisis-us-announces-new-tranche-of-sanctions-and-export-controls",
+   "https://www.themoscowtimes.com/2026/10/08/uk-expands-sanctions-to-cover-90-of-russian-oil-output-shadow-fleet-and-finance-networks-a93922",
+   "https://www.arnoldporter.com/en/perspectives/advisories/2024/03/us-imposes-sanctions-targeting-russias-military-industrial-base"
+  ],
+  "searxng": [
+   "https://home.treasury.gov/news/press-releases/jy1296",
+   "https://fraser.stlouisfed.org/title/press-releases-united-states-department-treasury-6111/targeting-key-sectors-evasion-efforts-military-supplies-treasury-expands-intensifies-sanctions-russia-628672/fulltext",
+   "https://www.hsfkramer.com/notes/sanctions/2023-02/treasury-expands-and-intensifies-sanctions-against-russia-by-targeting-key-sectors-evasion-efforts-and-military-supplies",
+   "https://www.lexology.com/library/detail.aspx?g=e2fe3168-f266-422d-9f62-1682147ea322",
+   "https://www.i-law.com/ilaw/doc/view.htm?id=432869",
+   "https://2021-2025.state.gov/holding-russia-and-belarus-to-account/",
+   "https://static1.squarespace.com/static/651ed8282eb91d79a976f8c2/t/651ee200d8ab003db0567989/1696522752444/Sarah+-+Russia+Ukaine+Essay+2023.6.pdf",
+   "https://report.az/en/other-countries/us-expands-sanctions-against-russia/",
+   "https://www.ropesgray.com/en/insights/alerts/2023/02/russia-ukraine-crisis-us-announces-new-tranche-of-sanctions-and-export-controls",
+   "https://www.acams.org/en/news/us-treasury-targets-global-russia-sanctions-evasion-military-procurement-networks"
+  ]
+ }
+}
