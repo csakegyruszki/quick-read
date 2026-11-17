@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 - 2026-11-17
+
+Breaking (environment)
+- The `mcp` extra now requires the MCP Python SDK 2.x (`mcp==2.3.0`, was `mcp==1.30.0`). Installing
+  `quick-read[mcp]` next to another package that pins `mcp<2` gives a resolver conflict; use a separate
+  virtual environment for the server if you need both.
+- `quick_read.mcp_server.mcp` is now an `mcp.server.mcpserver.MCPServer` (FastMCP was removed in mcp 2), so code
+  that used FastMCP-only attributes on it (`settings`, old `run()` arguments) must be updated.
+
+Unchanged for MCP clients
+- Tool name `quick_read`, its input schema (`url`, `max_chars` default 20000) and its output (one JSON text
+  content, no structured output) are the same as in 0.2.0, compared on both SDK versions.
+
+Changed
+- An unexpected exception inside the tool is reported by SDK 2 as `Error executing tool quick_read` without the
+  exception text (SDK 1 included it). Normal failures are unaffected: they come back as a result with `ok: false`
+  and an `error` code, as before.
+- The server reports the package version in `serverInfo.version` (SDK 2 no longer fills it in).
+- `trafilatura` pinned to 2.3.1 (was 2.3.0).
+
+Added
+- `tests/test_mcp_server.py`: stdio test of the MCP server (initialize, tools/list, tools/call on a blocked
+  address, no network needed); skipped when the `mcp` extra is not installed.
+
 ## 0.2.0 - 2026-10-10
 
 Added

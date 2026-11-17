@@ -4,11 +4,12 @@ Run: python -m quick_read.mcp_server   (stdio transport)
 """
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from .core import quick_read as _quick_read
 
-mcp = FastMCP("quick-read")
+mcp = MCPServer("quick-read", version=__version__)
 
 
 @mcp.tool()

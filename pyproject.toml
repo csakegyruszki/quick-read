@@ -4,18 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quick-read"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast single-URL reader for LLM agents: static fetch + text extraction with SSRF, type and size guards and prompt-injection risk scoring"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
     "httpx==0.28.1",
-    "trafilatura==2.3.0",
+    "trafilatura==2.3.1",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp==1.30.0"]
+mcp = ["mcp==2.3.0"]
 render = ["crawl4ai>=0.9.0,<0.10"]
 search = ["ddgs>=9.14,<10"]
 
